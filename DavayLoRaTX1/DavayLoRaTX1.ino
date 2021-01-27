@@ -1,11 +1,10 @@
 /*
-  LoRa RX, based on Duplex communication wth callback example
+  LoRa Davay TX, based on Duplex communication with callback example
+  Sends a message when button is pressed/released or pings on timer
+  Waits for reply on callback
+  Also makes "Pairing" with RX device.
 
-  Listens for a message from TX, about the button pressed/released.
-  Turnes LED ON/OFF and replies to TX when receives.
-  Also replies in "Pairing mode"
   Для другого диапазона надо пересмотреть некоторые дефайны
-  Для каждого RX выбрать MY_ADDRESS
 
 */
 #include <SPI.h>              // include libraries
@@ -49,12 +48,11 @@ long minFQ = round(MIN_FQ / 1.0E5) * 1.0E5;
 #define PAIRING_START_ATTEMPTS  2
 #define PAIRING_COMM_ATTEMPTS 5
 #define WORK_COMM_ATTEMPTS 3
-#define PING_TIMEOUT 5000  //ms
-#define PING_FLASH_ACTIVE 200  //ms
-#define PING_FLASH_PAUSE 400  //ms
+#define PING_TIMEOUT 3000  //ms
+#define PING_FLASH 100  //ms
 
-#define PIN_LED  5  // Номер пина Arduino, к которому подключен вывод статусного ЛЕД-а 
-#define PIN_SIGNAL  6  // Номер пина Arduino, к которому подключен вывод сигнала
+#define PIN_BUTTON  6  // Номер пина Arduino, к которому подключен вывод кнопки (притянуто к 5в)
+#define PIN_LED  5  // Номер пина Arduino, к которому подключен вывод LED обратной связи
 #define PIN_PAIR  4  // Номер пина Arduino, к которому подключен вывод кнопки Паринга (притянуто к 5в)
 
 //Просто чтобы не забыть, что такое возможно для SPI, вместо дефолтов:
@@ -65,7 +63,7 @@ long minFQ = round(MIN_FQ / 1.0E5) * 1.0E5;
 //Практически, описание протокола:
 #define CMD_PAIRING     200 //TX передаёт команду/команду с бродкастным адресом
 #define CMD_PAIRING_OK  201 //RX отвечает /свой зашитый адрес с бродкастным адресом
-#define CMD_ADDR        202 //TX передаёт по адресу полученный адрес/адрес
+#define CMD_ADDR        202 //TX передаёт полученный адрес/адрес с адресом :)
 #define CMD_ADDR_OK     203 //RX отвечает /адрес с адресом
 #define CMD_CHANNEL     204 //TX передаёт свой будущий /канал
 #define CMD_CHANNEL_OK  205 //RX отвечает, что переключается/канал
@@ -76,17 +74,14 @@ long minFQ = round(MIN_FQ / 1.0E5) * 1.0E5;
 #define CMD_PING        212 //TX пингует периодически с /состоянием леда
 #define CMD_PONG        213 //RX отвечает с состоянием леда
 #define CMD_PING_OK     213 //то же что предыдущее
-//Specific for each RX:
-#define MY_ADDRESS      78
 
-byte workAddress = MY_ADDRESS;  // address of connection
-byte msgNumber = 0;                    // = number of the received message: reply always this number
-byte rcvCmd = CMD_PONG;          // expected command (Default = PONG)
+byte workAddress = BROADCAST_ADDRESS;  // address of connection
+byte msgCount = 0;                    // = number of outgoing message
+byte sndCmd = CMD_PING;              // outgoing command Default = PING
+byte cmdExpected = CMD_PONG;          // expected command (Default = PONG)
 byte rcvData;                         // additional data byte received
-byte sndCmd = CMD_PONG;              // outgoing command Default = PING
 byte sndData;                         // additional data byte sent
-bool signalStatus;                     //last received TX Button status
-bool statePairing;                    //state of pairing: 1 or 0 (no pairing)
+bool wasReceived;                     //indication of reply message received
 byte workChannel;                      //channel to send to RX while paring and work on it
 unsigned long workFrequency = CALL_FQ; //working Frequency
 
@@ -95,14 +90,15 @@ int lastRSSI;
 float lastSNR;
 unsigned long lastTurnaround;         // round-trip time between tx and rx
 long lastFrequencyError;
+unsigned long expectedTimeout = DEFAULT_TIMEOUT;
 
-//bool currButtonState;               //Current state of Button
-//bool prevButtonState;               //Previous state of Button
+bool currButtonState;               //Current state of Button
+bool prevButtonState;               //Previous state of Button
 bool currPairingButtonState;              //State of Pairing button/pin
 bool prevPairingButtonState;              //State of Pairing button/pin
 
-unsigned long pingFlashPhase;
-unsigned long pingFlashTime;
+unsigned long pingTimer;
+unsigned long pingFlashTimer;
 bool pingFlash;
 
 void setup() {//=======================SETUP===============================
@@ -114,19 +110,18 @@ void setup() {//=======================SETUP===============================
 #endif
 
   DEBUGln("================================");
-  DEBUGln("=========== START RX ===========");
-  DEBUGln("Davay LoRa RX setup()");
+  DEBUGln("=========== START TX ===========");
+  DEBUGln("Davay LoRa TX setup()");
 
   // override the default CS, reset, and IRQ pins (optional)
   //  LoRa.setPins(csPin, resetPin, irqPin);// set CS, reset, IRQ pin
 
   //INIT PINS
-  pinMode(PIN_SIGNAL, OUTPUT);
+  pinMode(PIN_BUTTON, INPUT_PULLUP);
   pinMode(PIN_PAIR, INPUT_PULLUP);
   pinMode(PIN_LED, OUTPUT);
 
-  workFrequency = CALL_FQ;
-  if (!LoRa.begin(workFrequency)) {             // initialize radio at CALL Frequency
+  if (!LoRa.begin(CALL_FQ)) {             // initialize radio at CALL Frequency
     DEBUGln("LoRa init failed. Check your connections.");
     while (true) {
       flashlLedError();    // if failed, do nothing
@@ -137,74 +132,88 @@ void setup() {//=======================SETUP===============================
 
   LoRa.onReceive(onReceive);
   LoRa.onTxDone(onTxDone);
-  LoRa.receive(); //Always listen by default
+  LoRa.idle(); //Until we decide how to continue
 
-  DEBUGln("LoRa RX init success.");
+  DEBUGln("LoRa TX init success.");
 
   if (readEEPROM()) {
     //    setCommData();
-    statePairing = false;
   }
   else {    //Ecли не было ничего записано в EEPROM, то начать Паринг
-    statePairing = true;
+    while (!pairing()) {
+      DEBUGln("Initial Pairing unsuccessful");
+    }
   }
-  DEBUGln("Setup complete, Pairing: " + String(statePairing));
-}//setup      //=======================SETUP===============================
 
-void loop() { //  ===!!!===!!!===!!!===!!!===!!!===!!!===!!!===!!!===!!!===
+}//setup      //======================= SETUP ===============================
 
+void loop() { //  ===!!!===!!!===!!!===!!!= LOOP =!!!===!!!===!!!===!!!===!!!===
   processPairingButton();
-  processPing();  //see if we haven't lost connection to TX
-  processSignal();
+  processButton();
+  processPing();
 
-}//loop()         ===!!!===!!!===!!!===!!!===!!!===!!!===!!!===!!!===!!!===
+}//loop()         ===!!!===!!!===!!!===!!!= LOOP =!!!===!!!===!!!===!!!===!!!===
 
 void   processPairingButton() {
-  if (!statePairing) {
-    currPairingButtonState = !digitalRead(PIN_PAIR); // Читаем состояние кнопки 1=нажата; 0=отпущена
-    if ((prevPairingButtonState != currPairingButtonState) && (currPairingButtonState == 1)) {
-      //the previously released button becomes pressed - we do pairing.
-      prevPairingButtonState = currPairingButtonState;
-      statePairing = true;
-      signalStatus = false;
-      DEBUGln("Pairing Button worked!");
-      flashLedParing();
+  currPairingButtonState = !digitalRead(PIN_PAIR); // Читаем состояние кнопки 1=нажата; 0=отпущена
+  if ((prevPairingButtonState != currPairingButtonState) && (currPairingButtonState == 1)) {
+    //the previously released button becomes pressed - we do pairing.
+    DEBUGln("processPairingButton()");
+    prevPairingButtonState = currPairingButtonState;
+    while (!pairing()) {
+      DEBUGln("Forced Pairing unsuccessful");
     }
   }
-}// processPairingButton()
-
-void   processPing() {
-  if ((millis() - lastSendTime) > PING_TIMEOUT) { // if long time no signal from TX
-    signalStatus = false;
-    if ((millis() - pingFlashTime) > pingFlashPhase) {
-      pingFlash = !pingFlash;
-      if (pingFlash) {
-        pingFlashPhase = PING_FLASH_ACTIVE;
-      } else {
-        pingFlashPhase = PING_FLASH_PAUSE;
-      }
-      pingFlashTime = millis();
-      updateLed(pingFlash);
-    }
-  }
-}// processPing()
-
-void  processSignal() {
-  digitalWrite(PIN_SIGNAL, signalStatus);
 }
 
+void   processButton() {
+  currButtonState = !digitalRead(PIN_BUTTON); // Читаем состояние кнопки 1=нажата; 0=отпущена
+  if (prevButtonState != currButtonState) {   //button pressed or released
+    DEBUGln("processButton()");
+    prevButtonState = currButtonState;
+    if (commSession( CMD_LED, currButtonState, CMD_LED_OK, 2 * lastTurnaround, WORK_COMM_ATTEMPTS )) {
+      updateFBLed(currButtonState);
+    }
+    else {
+      updateFBLed(false);
+      flashlLedError();
+    }
+  }
+}
 
-void updateLed(bool ledStatus) { // turn ON or OFF the status LED
+void   processPing() {
+  if (pingFlash) {// ping reply already received, processing led flash only
+    if ((millis() - pingFlashTimer) > PING_FLASH) { //end led flash
+      pingFlash = false;
+      updateFBLed(false);
+    }
+    return;
+  }
+  if ((millis() - pingTimer) > PING_TIMEOUT) { // long time no comm
+    DEBUGln("processPing()");
+    if (commSession( CMD_PING, currButtonState, CMD_PONG, 2 * lastTurnaround, WORK_COMM_ATTEMPTS )) {
+      updateFBLed(true);
+      pingFlash = true;
+      pingFlashTimer = millis();
+    }
+    else {
+      updateFBLed(false);
+      flashlLedError();
+    }
+  }
+}
+
+void updateFBLed(bool ledStatus) { // turn ON or OFF the Feedback LED
   digitalWrite(PIN_LED, ledStatus);
-  DEBUGln("update Led(): " + String(ledStatus));
-}// updateLed(bool ledStatus)
+  //  DEBUGln("updateFBLed(): " + String(ledStatus));
+}
 
 void flashlLedError() { //flash 3 times total 1.5 sec
   DEBUGln("flashlLedError()");
   bool flash = false;
   for (int i = 0; i < 6; i++) {
     flash = !flash;
-    updateLed(flash);
+    updateFBLed(flash);
     delay(200);
   }
   delay(300);
@@ -215,7 +224,7 @@ void flashLedParing() { //flash 2 times before each pairing communication - tota
   bool flash = false;
   for (int i = 0; i < 4; i++) {
     flash = !flash;
-    updateLed(flash);
+    updateFBLed(flash);
     delay(200);
   }
   delay(300);
@@ -226,7 +235,7 @@ void flashLedParingOK() { //flash 1 long time - total 1.5 sec
   bool flash = false;
   for (int i = 0; i < 2; i++) {
     flash = !flash;
-    updateLed(flash);
+    updateFBLed(flash);
     delay(600);
   }
   delay(300);
@@ -241,6 +250,12 @@ long frequencyByChannel(byte numChannel) {
   return (minFQ + numChannel * CHANNEL_WIDTH);
 }
 // done frequencyByChannel(byte numChannel)
+
+byte workingChannel() {
+  DEBUGln("workingChannel()");
+  //TODO: define the best and unused channel
+  return WORKING_CHANNEL; //so far hardcoded;
+}
 
 bool readEEPROM() {
   DEBUGln("readEEPROM()");
@@ -266,22 +281,22 @@ void setLoRaParams() {
 
 }// DONE void setLoRaParams()
 
-void sendMessage(byte msgAddr, byte msgNumber, byte msgCmd, byte msgData) {
+void sendMessage(byte msgCmd, byte sndData) {
   //  DEBUGln("sendMessage(byte msgCmd, byte sndData)");
   while (!LoRa.beginPacket()) {
-    DEBUGln("Waiting to begin REPLY");
+    DEBUGln("Waiting to begin TX");
   }                   // start packet
-  LoRa.write(msgAddr);              // reply address
-  LoRa.write(msgNumber);              // reply Msg Number
-  LoRa.write(msgCmd);                  // reply command
-  LoRa.write(msgData);                 // reply Data
+  LoRa.write(workAddress);              // add address
+  LoRa.write(++msgCount);              // add Msg Number
+  LoRa.write(msgCmd);                  // add command
+  LoRa.write(sndData);                 // add Data
   while (!LoRa.endPacket()) {            // finish packet and send it
-    DEBUGln("Waiting to finish REPLY");
+    DEBUGln("Waiting to finish TX");
   }
   lastSendTime = millis();            // timestamp the message
   LoRa.receive();                     // go back into receive mode
-  DEBUGln(("sendMessage done! ") + String(workAddress)\
-          + " " + String(msgNumber) + " " + String(msgCmd) + " " + String(msgData));
+  DEBUGln("sendMessage done! " + String(workAddress)\
+          + " " + String(msgCount) + " " + String(msgCmd) + " " + String(sndData));
 }// void sendMessage(byte messageByte)
 
 void onTxDone() {
@@ -291,91 +306,109 @@ void onTxDone() {
 }
 
 void onReceive(int packetSize) {
-  DEBUGln("Package Received!");
+  DEBUGln("onReceive(int packetSize)");
   if (packetSize != 4) {
-    DEBUGln("Wrong Packet Size: " + String(packetSize));
+    DEBUGln("Invalid Packet Size: " + String(packetSize));
     return;          // not our packet, return
   }
   // read packet header bytes:
-  byte rcvAddress = LoRa.read();          // received address
-  byte rcvCount = LoRa.read();            // received Number
-  byte rcvCmd = LoRa.read();              // received command
-  byte rcvData = LoRa.read();                  // received data
+  byte rcvAddress = LoRa.read();          // replied address
+  if (rcvAddress != workAddress) {
+    DEBUGln("Invalid Address: " + String(rcvAddress) + ", Expected: " + String(workAddress));
+    return;
+  }
+  byte rcvCount = LoRa.read();    // replied number of Message
+  if (rcvCount != msgCount) {
+    DEBUGln("Invalid Number: " + String(rcvCount) + ", Expected: " + String(msgCount));
+    return;
+  }
+  byte rcvCmd = LoRa.read();    // replied command
+  if (rcvCmd != cmdExpected) {
+    DEBUGln("Invalid Reply: " + String(rcvCmd) + ", Expected: " + String(cmdExpected));
+    return;
+  }
+  rcvData = LoRa.read();
 
   lastRSSI =  LoRa.packetRssi();
   lastSNR = LoRa.packetSnr();
   lastTurnaround = millis() - lastSendTime;
   lastFrequencyError = LoRa.packetFrequencyError();
+  DEBUGln("Frequency Error: " + String(lastFrequencyError));
+  DEBUGln("Working Frequency before update: " + String(workFrequency));
+  workFrequency = workFrequency + lastFrequencyError;
+  DEBUGln("Working Frequency after update: " + String(workFrequency));
+  //  LoRa.setFrequency(workFrequency);
+  //  delay(20);
+  wasReceived = true;
 
-  if (!((rcvAddress == workAddress) || ((rcvAddress == BROADCAST_ADDRESS) && (statePairing) && (rcvCmd == CMD_PAIRING)))) {
-    DEBUGln("Wrong Address: " + String(rcvAddress) + " - " +  String(workAddress));
-    return;
-  }
-
-  msgNumber = rcvCount;
-
-  switch (rcvCmd) {
-    case CMD_PAIRING:
-    case CMD_ADDR:
-    case CMD_CHANNEL:
-    case CMD_START:
-      if (!statePairing) {
-        DEBUGln("Invalid command, when NOT Pairing: " + String(rcvCmd));
-        return;
-      }
-      break;
-    case CMD_LED:
-    case CMD_PING:
-      if (statePairing) {
-        DEBUGln("Invalid command, when Pairing: " + String(rcvCmd));
-        return;
-      }
-      break;
-    default:
-      DEBUGln("Unknown command: " + String(rcvCmd));
-  }
+  //Here we are if the received message is CORRECT
+  DEBUGln("Reply number: " + String(rcvCount));
+  DEBUGln("Reply command: " + String(rcvCmd));
+  DEBUGln("Reply Data: " + String(rcvData));
 
   DEBUGln("RSSI: " + String(lastRSSI));
   DEBUGln("Snr: " + String(lastSNR));
   DEBUGln("Turnaround: " + String(lastTurnaround));
   DEBUGln("Frequency Error: " + String(lastFrequencyError));
-  DEBUGln("Received Message: "  + String(rcvAddress) + " " + String(rcvCount)\
-          +" " + String( rcvCmd) + " " + String( rcvData));
-
-  switch (rcvCmd) {
-    case CMD_PAIRING:
-      DEBUGln("===CMD_PAIRING===");
-      workAddress = MY_ADDRESS;
-      sendMessage(rcvAddress, msgNumber, CMD_PAIRING_OK, workAddress);
-      break;
-    case CMD_ADDR:
-      DEBUGln("===CMD_ADDR===");
-      workAddress = rcvData;
-      sendMessage(rcvAddress, msgNumber, CMD_ADDR_OK, workAddress);
-      break;
-    case CMD_CHANNEL:
-      DEBUGln("===CMD_CHANNEL===");
-      workChannel = rcvData;
-      sendMessage(rcvAddress, msgNumber, CMD_CHANNEL_OK, workChannel);
-      workFrequency = frequencyByChannel(workChannel);
-//      LoRa.setFrequency(workFrequency);
-      DEBUGln("setFrequency: " + String(workFrequency));
-      break;
-    case CMD_START:
-      DEBUGln("===CMD_START===");
-      sendMessage(rcvAddress, msgNumber, CMD_START_OK, CMD_START_OK);
-      statePairing = false;
-      break;
-    case CMD_LED:
-      DEBUGln("===CMD_LED===");
-      signalStatus = rcvData;
-      sendMessage(rcvAddress, msgNumber, CMD_LED_OK, signalStatus);
-      break;
-    case CMD_PING:
-      DEBUGln("===CMD_PING===");
-      signalStatus = rcvData;
-      sendMessage(rcvAddress, msgNumber, CMD_PONG, signalStatus);
-
-  }
-
+  DEBUGln("Working Frequency: " + String(workFrequency));
+  DEBUGln("Receive Message Done!");
 }//void onReceive(int packetSize)
+
+bool commSession( byte msgCmd, byte sndData, byte expectedReply, unsigned long waitMilliseconds, int doTimes ) {
+  DEBUGln("commSession()");
+  wasReceived = false;
+  do {
+    EVERY_MS(waitMilliseconds) {
+      cmdExpected = expectedReply;
+      sendMessage(msgCmd, sndData);
+      doTimes--;
+      DEBUGln("Comm tries left: " + String(doTimes));
+    }
+  } while ((doTimes > 0) && (!wasReceived));
+  pingTimer = millis(); //refresh the ping timer after every communication
+  return wasReceived;
+
+}//commSession(...)
+
+bool pairing() {
+  DEBUGln("pairing()");
+  workFrequency = CALL_FQ;
+  LoRa.setFrequency(workFrequency);
+  expectedTimeout = DEFAULT_TIMEOUT;
+  //BROADCAST PARING, receive Pairing OK and address
+
+  DEBUGln(" == CMD_PAIRING == ");
+  flashLedParing();
+  if (!commSession(CMD_PAIRING, CMD_PAIRING, CMD_PAIRING_OK, PAIRING_TIMEOUT, PAIRING_START_ATTEMPTS)) return false;
+  //in fact, Pairing occures again after  failure...
+
+  //Send received ADDR as data and expect msg with Addr_OK
+  workAddress = rcvData; //In prev. connection, RX replied with her address
+  DEBUGln(" == CMD_ADDR == ");
+  flashLedParing();
+  expectedTimeout = 3 * lastTurnaround;
+  if (!commSession(CMD_ADDR, workAddress, CMD_ADDR_OK, expectedTimeout, PAIRING_COMM_ATTEMPTS)) return false;
+
+  //Send Channel and expect Channel OK
+  expectedTimeout = 3 * lastTurnaround;
+  workChannel = workingChannel();
+  DEBUGln(" == CMD_CHANNEL == ");
+  flashLedParing();
+  if (!commSession(CMD_CHANNEL, workChannel, CMD_CHANNEL_OK, expectedTimeout, PAIRING_COMM_ATTEMPTS)) return false;
+  if (rcvData != workChannel) return false;
+
+  //Send Start msg and expect Start OK
+  workFrequency = frequencyByChannel(workChannel);
+  //  LoRa.setFrequency(workFrequency);
+  DEBUGln("Frequency: " + String(workFrequency));
+  expectedTimeout = 3 * lastTurnaround;
+  DEBUGln(" == CMD_START == ");
+  flashLedParing();
+  if (!commSession(CMD_START, CMD_START, CMD_START_OK, expectedTimeout, PAIRING_COMM_ATTEMPTS)) return false;
+  if (rcvData != CMD_START_OK) return false; //дополнительная проверка
+
+  //Pairing is done OK at this point
+  DEBUGln(" == PARING OK != = ");
+  flashLedParingOK();
+  return true;
+}//void pairing()
