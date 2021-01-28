@@ -92,7 +92,7 @@ bool signalStatus;                     //last received TX Button status
 byte workChannel;                      //channel to send to RX while paring and work on it
 unsigned long workFrequency = CALL_FQ; //working Frequency
 
-long lastSendTime = 0;                // last send time
+unsigned long lastSendTime = 0;                // last send time
 int lastRSSI;
 float lastSNR;
 unsigned long lastTurnaround;         // round-trip time between tx and rx
@@ -103,6 +103,10 @@ unsigned long timeOutFlashTime;
 bool timeOutFlash;
 
 int pwmledBrightness = 20;           // 0 - 255 - Яркость большого леда
+
+//Cutoff settings:
+unsigned long cutoffTimer = 0;
+#define CUTOFF_TIME 2000  //ms
 
 void setup() {//=======================SETUP===============================
 
@@ -126,7 +130,7 @@ void setup() {//=======================SETUP===============================
   analogWrite(PIN_SIGNAL_LED, 0); //just in case - switch off FB on big led
   digitalWrite(PIN_BATTERY_LED, 0);
 
-  showBatteryVoltage();
+  // два раза показываем заряд батарейки:
   showBatteryVoltage();
   showBatteryVoltage();
 
@@ -151,6 +155,7 @@ void loop() { //  ===!!!===!!!===!!!===LOOP===!!!===!!!===!!!===!!!===!!!===
 
   processTimeOut();  //see if we haven't lost connection to TX
   processCommand();
+  processCutoff();
   EVERY_MS(100000) {
     processBattery();
   }
@@ -200,10 +205,18 @@ void processCommand() {
 
 
 void  processSignal() {
-  analogWrite(PIN_SIGNAL_LED, signalStatus * pwmledBrightness); //just in case - switch off FB on big led
+  cutoffTimer = millis();
+  analogWrite(PIN_SIGNAL_LED, signalStatus * pwmledBrightness);
   digitalWrite(PIN_SIGNAL_BUZZERS, signalStatus);
 }
 
+void processCutoff() {
+  if (millis()-cutoffTimer>CUTOFF_TIME) {
+    signalStatus = 0;
+    analogWrite(PIN_SIGNAL_LED, 0);
+    digitalWrite(PIN_SIGNAL_BUZZERS, 0);
+  }
+}
 
 void updateLed(bool ledStatus) { // turn ON or OFF the status LED
   digitalWrite(PIN_LED, ledStatus);

@@ -54,7 +54,7 @@
 #define PIN_FB_LED  5  // Номер пина Arduino, к которому подключен вывод LED обратной связи
 #define PIN_BATTERY 9  // Номер пина Адафрута для измерения батарейки
 #define PIN_PWM_LED 11 // Номер пина для ШИМ большого ЛЕДа
-#define PIN_BATTERY_LED LED_BUILTIN  // Номер Адафрута для измерения батарейки
+#define PIN_BATTERY_LED 5 //LED_BUILTIN  // Номер Адафрута для измерения батарейки
 
 //Коэффициент для батарейки. Для Adafruit поставить 2, для BSFrance поставить 1.27
 float batteryVoltageMultiplier = 2;
@@ -136,8 +136,8 @@ void setup() {//=======================SETUP===============================
   analogWrite(PIN_PWM_LED, 0); //just in case - switch off PWM on big led
   digitalWrite(PIN_BATTERY_LED, 0);
 
+// два раза показываем заряд батарейки:
   delay(1000);
-  showBatteryVoltage();
   showBatteryVoltage();
   showBatteryVoltage();
 
