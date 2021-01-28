@@ -2,10 +2,11 @@
   LoRa Adafruit Feather32u4 433MHz module
   Davay RX, based on Duplex communication wth callback example
   Listens for a message from TX, about the button pressed/released.
-  Turnes LED ON/OFF and replies to TX when receives.
-  Для другого диапазона надо пересмотреть некоторые дефайны
-  Для каждого RX выбрать MY_ADDRESS
+  Turnes LED|Buzzer|Vibro  ON/OFF and replies to TX when receives.
+  Для каждой пары TX-RX надо поменять в коде частоту, делитель батарейки и выбрать MY_ADDRESS
+  Для изменений искать (Ctrl-F), пометив слово: МЕНЯТЬ 
 */
+
 #include <SPI.h>              // include libraries
 #include <LoRa.h>
 //#include <EEPROM.h>
@@ -14,7 +15,7 @@
 #error "This code is not compatible with the Arduino MKR WAN 1300 board!"
 #endif
 
-// Дебагирование: раскомментить для использования 1 строчку:
+// Дебагирование с компьютером : раскомментить для использования 1 строчку:
 //#define DEBUG_ENABLE
 #ifdef DEBUG_ENABLE
 #define DEBUG(x) Serial.print(String(millis())+" "+x)
@@ -25,6 +26,7 @@
 #endif
 
 //==== MILLIS TIMER MACRO ====
+// воспомогательное макро
 // performs the {subsequent} code once and then, if needed, again after each x ms
 #define EVERY_MS(x) \
   static uint32_t tmr;\
@@ -33,31 +35,34 @@
   if (flg)
 //===========================
 
-#define CALL_FQ 434E6                       //стартовая рабочая частота.
+#define CALL_FQ 434E6                       //рабочая частота.
+//Это остатки от программирования «паринга», тут остались просто на всякий случай
 #define MIN_FQ 433.05E6                     //минимальная частота диапазона.
 #define MAX_FQ 434.79E6                     //максимальная рабочая частота.
-#define CHANNEL_WIDTH 1E5                 // поставить 100 или 200 KHz
+#define CHANNEL_WIDTH 1E5                 // 100 или 200 KHz
 #define NUM_LORA_CHANNELS (MAX_FQ - MIN_FQ)/CHANNEL_WIDTH   //количество каналов столько кГц
 long minFQ = round(MIN_FQ / 1.0E5) * 1.0E5;
-//TODO: сделать выбор рабочего канала:
+//TODO: сделать выбор рабочего канала, вместо частоты:
 #define WORKING_CHANNEL 5
 #define BROADCAST_ADDRESS 0xFF
-#define WORK_COMM_ATTEMPTS 3
+
+
 #define PING_TIMEOUT 5000  //ms
 #define PING_FLASH_ACTIVE 200  //ms
 #define PING_FLASH_PAUSE 400  //ms
-#define BATTERY_MIN 3.4   //Volt min.
+#define BATTERY_MIN 3.3   //Volt min. - ниже этого программа пытается не работать, хотя используемые батарейки самоотключаются при 2.7В
 
-#define PIN_SIGNAL_LED  6  // Номер пина, к которому подключен вывод сигнала для ЛЕДа
-#define PIN_SIGNAL_BUZZERS  5  // Номер пина, к которому подключен вывод сигнала для Баззера и Вибро
+#define PIN_SIGNAL_LED  6  // Номер пина для вывода сигнала для ЛЕДа
+#define PIN_SIGNAL_BUZZERS  5  // Номер пина для вывода сигнала для Баззера и Вибро
 #define PIN_LED  LED_BUILTIN  // Номер пина, к которому подключен вывод статусного ЛЕД-а (LED_BUILTIN=13) 
 #define PIN_BATTERY 9  // Номер пина Адафрута для измерения батарейки
-#define PIN_BATTERY_LED LED_BUILTIN  // Номер Адафрута для измерения батарейки
+#define PIN_BATTERY_LED LED_BUILTIN  // Номер пина для показа напряжения батарейки
 
-//Коэффициент для батарейки. Для Adafruit поставить 2, для BSFrance поставить 1.27
+//МЕНЯТЬ Коэффициент делителя для измерения батарейки. 
+//Для Adafruit поставить 2, для BSFrance поставить 1.27
 float batteryVoltageMultiplier = 2;
 
-//Дефолтовые: 10, 9, 2 для SPI библиотеки
+//Дефолтовые значения для SPI библиотеки: 10, 9, 2. Для наших плат действуют такие: 
 const int csPin = 8;          // LoRa radio chip select
 const int resetPin = 4;       // LoRa radio reset
 const int irqPin = 7;         // change for your board; must be a hardware interrupt pin
@@ -77,7 +82,7 @@ const int irqPin = 7;         // change for your board; must be a hardware inter
 #define CMD_PONG        213 //RX отвечает с состоянием леда
 #define CMD_PING_OK     213 //то же что предыдущее
 
-//Specific for each RX:
+//МЕНЯТЬ синхронно для TX и RX в диапазоне 0-254 
 #define MY_ADDRESS      78
 
 byte workAddress = MY_ADDRESS;  // address of connection
@@ -90,7 +95,7 @@ byte sndCmd = CMD_PONG;              // outgoing command Default = PING
 byte sndData;                         // additional data byte sent
 bool signalStatus;                     //last received TX Button status
 byte workChannel;                      //channel to send to RX while paring and work on it
-unsigned long workFrequency = CALL_FQ; //working Frequency
+unsigned long workFrequency; //working Frequency
 
 unsigned long lastSendTime = 0;                // last send time
 int lastRSSI;
@@ -104,9 +109,9 @@ bool timeOutFlash;
 
 int pwmledBrightness = 20;           // 0 - 255 - Яркость большого леда
 
-//Cutoff settings:
+//МЕНЯТЬ ? Cutoff settings:
 unsigned long cutoffTimer = 0;
-#define CUTOFF_TIME 2000  //ms
+#define CUTOFF_TIME 2000  //ms - максимальное время работы сигнала
 
 void setup() {//=======================SETUP===============================
 
@@ -134,7 +139,11 @@ void setup() {//=======================SETUP===============================
   showBatteryVoltage();
   showBatteryVoltage();
 
-  workFrequency = CALL_FQ;
+//МЕНЯТЬ рабочую частоту (синхронно на TX и RX!)
+//Желательно сильно не уходить от значения 434E6 ()
+//просто добавлять-убавлять десятые, например: 433.9E6, 433.8E6, или 434.1E6, 434.2E6  
+ workFrequency = 434E6;
+
   if (!LoRa.begin(workFrequency)) {             // initialize radio at CALL Frequency
     DEBUGln("LoRa init failed. Check your connections.");
     while (true) {
@@ -282,7 +291,7 @@ void sendMessage(byte msgAddr, byte msgNumber, byte msgCmd, byte msgData) {
 
 void onReceive(int packetSize) {
   DEBUGln("Package Received!");
-  if (packetSize != 4) {
+  if (packetSize != 4) { //нас интересуют только пакеты в 4 байта
     DEBUGln("Wrong Packet Size: " + String(packetSize));
     return;          // not our packet, return
   }
@@ -293,10 +302,12 @@ void onReceive(int packetSize) {
   rcvCmd = LoRa.read();              // received command
   rcvData = LoRa.read();                  // received data
 
+#ifdef DEBUG_ENABLE  //только имеет смысл для дебагинга
   lastRSSI =  LoRa.packetRssi();
   lastSNR = LoRa.packetSnr();
   lastTurnaround = millis() - lastSendTime;
   lastFrequencyError = LoRa.packetFrequencyError();
+#endif
 
   if (rcvAddress != workAddress) {
     DEBUGln("Wrong Address: " + String(rcvAddress) + " - " +  String(workAddress));

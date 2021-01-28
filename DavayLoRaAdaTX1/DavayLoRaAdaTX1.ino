@@ -3,8 +3,8 @@
   Davay TX, based on Duplex communication with callback example
   Sends a message when button is pressed/released or pings on timer
   Waits for reply on callback
-  Для другого диапазона надо пересмотреть некоторые дефайны
-
+  Для каждой пары TX-RX надо поменять в коде частоту, делитель батарейки и выбрать MY_ADDRESS
+  Для изменений искать (Ctrl-F), пометив слово: МЕНЯТЬ 
 */
 #include <SPI.h>              // include libraries
 #include <LoRa.h>
@@ -56,7 +56,8 @@
 #define PIN_PWM_LED 11 // Номер пина для ШИМ большого ЛЕДа
 #define PIN_BATTERY_LED 5 //LED_BUILTIN  // Номер Адафрута для измерения батарейки
 
-//Коэффициент для батарейки. Для Adafruit поставить 2, для BSFrance поставить 1.27
+//МЕНЯТЬ Коэффициент делителя для измерения батарейки. 
+//Для Adafruit поставить 2, для BSFrance поставить 1.27
 float batteryVoltageMultiplier = 2;
 
 //Дефолтовые: 10, 9, 2 для SPI библиотеки
@@ -79,7 +80,7 @@ const int irqPin = 7;         // change for your board; must be a hardware inter
 #define CMD_PONG        213 //RX отвечает с состоянием леда
 #define CMD_PING_OK     213 //то же что предыдущее
 
-//Specific for each RX:
+//МЕНЯТЬ синхронно для TX и RX в диапазоне 0-254 
 #define MY_ADDRESS      78
 
 byte workAddress = MY_ADDRESS;  // address of connection
@@ -141,7 +142,12 @@ void setup() {//=======================SETUP===============================
   showBatteryVoltage();
   showBatteryVoltage();
 
-  if (!LoRa.begin(CALL_FQ)) {             // initialize radio at CALL Frequency
+//МЕНЯТЬ рабочую частоту (синхронно на TX и RX!) в диапазоне 433.1E6 - 434.8E6
+//Желательно сильно не уходить от значения 434E6 ()
+//просто добавлять-убавлять десятые, например: 433.9E6, 433.8E6, или 434.1E6, 434.2E6  
+ workFrequency = 434E6;
+
+  if (!LoRa.begin(workFrequency)) {             // initialize radio at workFrequency
     DEBUGln("LoRa init failed. Check your connections.");
     while (true) {
       flashlLedError();    // if failed, do nothing
@@ -371,8 +377,10 @@ void onReceive(int packetSize) {
   }
   rcvData = LoRa.read();
 
+#ifdef DEBUG_ENABLE
   lastRSSI =  LoRa.packetRssi();
   lastSNR = LoRa.packetSnr();
+#endif
   lastTurnaround = millis() - lastSendTime;
   lastFrequencyError = LoRa.packetFrequencyError();
 
